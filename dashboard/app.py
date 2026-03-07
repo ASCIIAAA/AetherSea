@@ -1,205 +1,262 @@
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
 import streamlit as st
-import math
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import plotly.graph_objects as go
 
-from dashboard.stratergy_engine import compare_strategies
-from dashboard.visualisations import (
-    risk_over_time_chart,
-    peak_risk_bar_chart,
-    spatial_map
-)
-from dashboard.spatial_simulation import simulate_spatial_drift
-
-
-# ---------------------------
-# Fleet Routing Logic
-# ---------------------------
-
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371  # Earth radius in km
-
-    dLat = math.radians(lat2 - lat1)
-    dLon = math.radians(lon2 - lon1)
-
-    a = (
-        math.sin(dLat/2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dLon/2) ** 2
-    )
-
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
-
-
-def compute_optimal_intercept(start_lat, start_lon, drift_coords, vessel_speed):
-    """
-    Finds earliest intercept point based on vessel speed (km/day).
-    """
-    best_day = None
-    best_distance = None
-
-    for day, (d_lat, d_lon) in enumerate(drift_coords):
-        distance = haversine(start_lat, start_lon, d_lat, d_lon)
-        travel_time = distance / vessel_speed
-
-        if travel_time <= day:
-            best_day = day
-            best_distance = distance
-            break
-
-    # If no early intercept possible → intercept at final point
-    if best_day is None:
-        best_day = len(drift_coords) - 1
-        best_distance = haversine(
-            start_lat,
-            start_lon,
-            drift_coords[-1][0],
-            drift_coords[-1][1],
-        )
-
-    intercept_point = drift_coords[best_day]
-
-    path = [(start_lat, start_lon), intercept_point]
-
-    return {
-        "intercept_day": best_day,
-        "distance": best_distance,
-        "path": path
-    }
-
-
-# ---------------------------
-# Streamlit UI
-# ---------------------------
+from models.drift_simulation import run_simulation
+from agents.cleanup_agent import CleanupAgent
+from agents.route_optimizer import RouteOptimizer
 
 st.set_page_config(layout="wide")
-st.title("🌊 AetherSea Marine Response Control Room")
+
+st.title("🌊 AETHERSEA — Ocean Plastic Cleanup AI System")
 
 st.markdown(
-    "<h3 style='color:#00d4ff;'>Real-Time Environmental Strategy & Fleet Optimization</h3>",
-    unsafe_allow_html=True
+"""
+This system simulates **ocean plastic drift**, detects **high concentration plastic hotspots**,  
+and calculates the **most efficient cleanup route for autonomous vessels**.
+"""
 )
 
-# ---------------------------
-# Sidebar Inputs
-# ---------------------------
+st.sidebar.header("Simulation Controls")
 
-st.sidebar.header("Environmental Inputs")
-
-D0 = st.sidebar.slider("Initial Plastic Density", 10, 100, 50)
-C = st.sidebar.slider("Ocean Current Strength", 1, 10, 5)
-W = st.sidebar.slider("Wind Influence", 1, 10, 5)
-L = st.sidebar.slider("Distance to Coast (km)", 1, 20, 10)
-
-st.sidebar.header("Spatial Inputs")
-
-lat = st.sidebar.number_input("Garbage Latitude", value=12.0)
-lon = st.sidebar.number_input("Garbage Longitude", value=72.0)
-
-fleet_lat = st.sidebar.number_input("Fleet Base Latitude", value=11.5)
-fleet_lon = st.sidebar.number_input("Fleet Base Longitude", value=71.5)
-
-vessel_speed = st.sidebar.slider(
-    "Vessel Speed (km per day)", 50, 500, 150
+top_hotspots = st.sidebar.slider(
+    "Number of hotspots to detect",
+    3,
+    10,
+    5
 )
 
-# ---------------------------
-# Strategy Simulation
-# ---------------------------
+run_system = st.sidebar.button("Run Simulation")
 
-results, best_strategy = compare_strategies(D0, C, W, L)
 
-col1, col2 = st.columns(2)
+def compute_route_distance(route):
 
-with col1:
-    st.plotly_chart(
-        risk_over_time_chart(results),
-        use_container_width=True
+    dist = 0
+
+    for i in range(len(route)-1):
+
+        lat1, lon1 = route[i]
+        lat2, lon2 = route[i+1]
+
+        d = np.sqrt((lat2-lat1)**2 + (lon2-lon1)**2)
+
+        dist += d
+
+    return dist
+
+
+if run_system:
+
+    accumulation, latitudes, longitudes = run_simulation()
+
+    st.header("1️⃣ Plastic Drift Simulation")
+
+    col1, col2, col3 = st.columns([1,2,1])
+
+    with col2:
+
+        fig1, ax1 = plt.subplots(figsize=(4,3))
+
+        ax1.imshow(
+            accumulation,
+            origin="lower",
+            cmap="viridis"
+        )
+
+        ax1.set_title("Plastic Accumulation Heatmap")
+
+        st.pyplot(fig1)
+
+    st.markdown(
+    """
+**What this shows**
+
+Ocean currents move floating plastic over time.  
+This simulation predicts where plastic debris will accumulate.
+
+**Key Insight**
+
+Brighter regions indicate **high plastic concentration zones** where cleanup efforts should focus.
+"""
     )
 
-with col2:
-    st.plotly_chart(
-        peak_risk_bar_chart(results),
-        use_container_width=True
+    st.divider()
+
+    st.header("2️⃣ Plastic Hotspot Detection")
+
+    cleanup_agent = CleanupAgent()
+
+    hotspots = cleanup_agent.detect_hotspots(
+        accumulation,
+        latitudes,
+        longitudes,
+        top_hotspots
     )
 
-# ---------------------------
-# AI Decision Section
-# ---------------------------
+    col1, col2, col3 = st.columns([1,2,1])
 
-st.subheader("🧠 AI Strategy Decision Engine")
-st.success(f"Recommended Strategy: {best_strategy}")
+    with col2:
 
-data = results[best_strategy]
+        fig2, ax2 = plt.subplots(figsize=(4,3))
 
-st.write("### Strategy Performance Summary")
-st.write(f"""
-• Final Risk after 7 days: **{data['final_risk']:.2f}**  
-• Peak Risk observed: **{data['peak_risk']:.2f}**  
-• Operational Cost Score: **{data['cost']}**  
-• Utility Score: **{data['utility_score']:.2f}**
-""")
+        ax2.imshow(
+            accumulation,
+            origin="lower",
+            cmap="magma"
+        )
 
-# ---------------------------
-# Spatial Drift Simulation
-# ---------------------------
+        for h in hotspots:
 
-drift_coords = simulate_spatial_drift(lat, lon, C, W)
+            lat_idx = np.abs(latitudes - h["lat"]).argmin()
+            lon_idx = np.abs(longitudes - h["lon"]).argmin()
 
-# ---------------------------
-# Fleet Optimal Intercept
-# ---------------------------
+            ax2.scatter(
+                lon_idx,
+                lat_idx,
+                color="cyan",
+                s=120
+            )
 
-intercept_data = compute_optimal_intercept(
-    fleet_lat,
-    fleet_lon,
-    drift_coords,
-    vessel_speed
-)
+        ax2.set_title("Detected Plastic Hotspots")
 
-intercept_day = intercept_data["intercept_day"]
-distance = intercept_data["distance"]
-path_coords = intercept_data["path"]
+        st.pyplot(fig2)
 
-# ---------------------------
-# Map Section
-# ---------------------------
+    st.markdown(
+    """
+**What this shows**
 
-st.divider()
-st.subheader("🌍 Marine Drift & Optimal Fleet Interception")
+The Cleanup Agent scans the plastic distribution and detects **hotspots** — areas with the highest plastic density.
 
-st.plotly_chart(
-    spatial_map(drift_coords, path_coords),
-    use_container_width=True
-)
+**Key Insight**
 
-st.write("### 🚢 Fleet Interception Analysis")
+These hotspots represent the **priority regions for cleanup operations**.
+"""
+    )
 
-st.write(f"""
-• Optimal Intercept Day: **Day {intercept_day}**  
-• Travel Distance: **{distance:.2f} km**  
-• Vessel Speed: **{vessel_speed} km/day**  
-• Estimated Travel Time: **{distance / vessel_speed:.2f} days**
-""")
+    st.divider()
 
-# ---------------------------
-# Combined Strategic Explanation
-# ---------------------------
+    st.header("3️⃣ Cleanup Route Optimization")
 
-st.subheader("📊 Integrated Operational Justification")
+    route_agent = RouteOptimizer()
 
-st.write(f"""
-The AI recommends **{best_strategy}** based on a 7-day
-risk–cost utility optimization model.
+    start_location = (
+        float(latitudes[0]),
+        float(longitudes[0])
+    )
 
-Simultaneously, fleet routing optimization determines
-that interception is feasible on **Day {intercept_day}**,
-minimizing spread escalation before coastal impact.
+    route = route_agent.compute_cleanup_route(
+        start_location,
+        hotspots
+    )
 
-This integrated decision framework ensures:
+    route_distance = compute_route_distance(route)
 
-• Environmental risk reduction  
-• Cost-aware intervention  
-• Minimum intercept delay  
-• Operational efficiency  
-""")
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Hotspots Detected", len(hotspots))
+    col2.metric("Cleanup Stops", len(route))
+    col3.metric("Estimated Route Distance", f"{route_distance:.3f}")
+
+    st.markdown(
+    """
+**What this shows**
+
+The Route Optimization Agent calculates the **most efficient path** for a cleanup vessel to visit all hotspots.
+
+**Key Insight**
+
+Optimized routing reduces **fuel usage, travel time, and operational cost**.
+"""
+    )
+
+    st.divider()
+
+    st.header("4️⃣ Cleanup Route Map")
+
+    hotspot_lats = [h["lat"] for h in hotspots]
+    hotspot_lons = [h["lon"] for h in hotspots]
+
+    route_lats = [r[0] for r in route]
+    route_lons = [r[1] for r in route]
+
+    fig_map = go.Figure()
+
+    fig_map.add_trace(
+        go.Scattergeo(
+            lat=hotspot_lats,
+            lon=hotspot_lons,
+            mode="markers",
+            marker=dict(size=10),
+            name="Plastic Hotspots"
+        )
+    )
+
+    fig_map.add_trace(
+        go.Scattergeo(
+            lat=route_lats,
+            lon=route_lons,
+            mode="lines+markers+text",
+            text=[str(i+1) for i in range(len(route))],
+            textposition="top center",
+            name="Cleanup Route"
+        )
+    )
+
+    fig_map.update_layout(
+        height=500,
+        geo=dict(
+            projection_type="natural earth",
+            showland=True
+        )
+    )
+
+    st.plotly_chart(fig_map, use_container_width=True)
+
+    st.markdown(
+    """
+**What this shows**
+
+The map displays **plastic hotspots and the optimized cleanup path**.
+
+The numbered markers show the **order in which a cleanup vessel should visit each hotspot**.
+
+**Key Insight**
+
+This allows marine cleanup teams to **immediately deploy vessels along the most efficient route**.
+"""
+    )
+
+    st.divider()
+
+    st.header("📍 Cleanup Waypoints")
+
+    route_table = pd.DataFrame(
+        route,
+        columns=["Latitude", "Longitude"]
+    )
+
+    route_table.index += 1
+    route_table.index.name = "Stop Order"
+
+    st.dataframe(route_table)
+
+    st.markdown(
+    """
+**What this shows**
+
+These coordinates represent the **exact cleanup locations** the vessel should visit.
+
+**Key Insight**
+
+Operational teams can directly use these coordinates to **deploy cleanup ships or autonomous vessels**.
+"""
+    )
+
+    st.success("Simulation complete — cleanup route ready.")

@@ -5,8 +5,8 @@ import time
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from agents.monitoring_agent import MonitoringAgent
-from agents.risk_agent import RiskAssessmentAgent
-from agents.logistics_agent import LogisticsAgent
+from agents.cleanup_agent import RiskAssessmentAgent
+from agents.route_optimizer import LogisticsAgent
 
 
 def main():
